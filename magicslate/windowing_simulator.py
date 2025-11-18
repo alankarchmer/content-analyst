@@ -323,3 +323,155 @@ def compare_scenarios(df_scenarios: pd.DataFrame) -> str:
             narrative.append(f"- Theatrical windows contribute an average of **{avg_theatrical_pct:.0f}%** of total value.\n")
     
     return "".join(narrative)
+
+
+def compute_cashflow_timeline(
+    title_id: str,
+    scenario: WindowingScenario,
+    df_titles: pd.DataFrame,
+    df_engagement: pd.DataFrame,
+    df_quality: pd.DataFrame,
+    periods_per_year: int = 52
+) -> pd.DataFrame:
+    """Compute period-by-period cashflows for a windowing scenario.
+    
+    Args:
+        title_id: Title identifier
+        scenario: WindowingScenario configuration
+        df_titles: Titles DataFrame
+        df_engagement: Engagement DataFrame
+        df_quality: Quality DataFrame
+        periods_per_year: 52 for weekly, 12 for monthly
+        
+    Returns:
+        DataFrame with columns: period, theatrical_cf, pvod_cf, streaming_cf, 
+                                ad_cf, license_cf, total_cf, cumulative_npv
+    """
+    # Get title data
+    title_row = df_titles[df_titles["title_id"] == title_id].iloc[0]
+    title_engagement = df_engagement[df_engagement["title_id"] == title_id].copy()
+    quality_row = df_quality[df_quality["title_id"] == title_id].iloc[0]
+    
+    title_metadata = title_row.to_dict()
+    quality_dict = quality_row.to_dict()
+    
+    # Compute values for each window
+    # 1. Theatrical
+    theatrical_value = 0.0
+    if title_row["content_type"] == "Film":
+        theatrical_value = asmp.estimate_theatrical_revenue(
+            title_metadata=title_metadata,
+            quality_scores=quality_dict
+        )
+    
+    # 2. PVOD
+    pvod_value = 0.0
+    if theatrical_value > 0 and scenario.pvod_window_days > 0:
+        streaming_offset = max(
+            scenario.disney_plus_offset_days,
+            scenario.hulu_offset_days
+        )
+        pvod_value = asmp.estimate_pvod_revenue(
+            theatrical_revenue=theatrical_value,
+            quality_scores=quality_dict,
+            streaming_window_days=streaming_offset
+        )
+    
+    # 3. Streaming
+    total_hours = title_engagement["proxy_hours_viewed"].sum()
+    platform = title_row["platform_primary"]
+    
+    value_metrics = met.hours_to_value_metrics(
+        total_hours=total_hours,
+        title_metadata=title_metadata,
+        quality_scores=quality_dict,
+        platform=platform
+    )
+    
+    base_streaming_value = value_metrics["total_streaming_value"]
+    ad_value = value_metrics["ad_value"]
+    
+    # Adjust for window timing
+    streaming_offset = max(
+        scenario.disney_plus_offset_days,
+        scenario.hulu_offset_days
+    )
+    
+    if streaming_offset < 45:
+        streaming_multiplier = 1.0
+    elif streaming_offset < 90:
+        streaming_multiplier = 0.95
+    else:
+        streaming_multiplier = 0.85 + (1.0 - min(streaming_offset / 365, 1.0)) * 0.1
+    
+    adjusted_streaming_value = base_streaming_value * streaming_multiplier
+    
+    # Apply licensing cannibalization
+    has_license = scenario.third_party_license_start_days > 0
+    if has_license:
+        adjusted_streaming_value = asmp.apply_license_cannibalization(
+            base_streaming_value=adjusted_streaming_value,
+            has_third_party_license=True
+        )
+    
+    license_value = scenario.third_party_license_fee if has_license else 0.0
+    
+    # Build period-by-period cashflows
+    max_periods = 260  # 5 years of weekly periods
+    cashflows = []
+    
+    for period in range(max_periods):
+        cf_theatrical = 0.0
+        cf_pvod = 0.0
+        cf_streaming = 0.0
+        cf_ad = 0.0
+        cf_license = 0.0
+        
+        # Theatrical (weeks 0-12)
+        if theatrical_value > 0 and period < 12:
+            cf_theatrical = theatrical_value / 12
+        
+        # PVOD (after theatrical window)
+        if pvod_value > 0:
+            pvod_start_period = scenario.theatrical_window_days // 7
+            pvod_duration_periods = scenario.pvod_window_days // 7
+            if pvod_start_period <= period < (pvod_start_period + pvod_duration_periods):
+                cf_pvod = pvod_value / pvod_duration_periods
+        
+        # Streaming (after streaming offset, decays over 2 years)
+        streaming_start_period = streaming_offset // 7
+        streaming_duration = 104  # 2 years
+        if streaming_start_period <= period < (streaming_start_period + streaming_duration):
+            weeks_since_start = period - streaming_start_period
+            decay_factor = np.exp(-0.05 * weeks_since_start / 52)
+            cf_streaming = (adjusted_streaming_value / streaming_duration) * decay_factor
+            cf_ad = (ad_value / streaming_duration) * decay_factor
+        
+        # License (lump sum at license start)
+        if license_value > 0:
+            license_period = scenario.third_party_license_start_days // 7
+            if period == license_period:
+                cf_license = license_value
+        
+        total_cf = cf_theatrical + cf_pvod + cf_streaming + cf_ad + cf_license
+        
+        cashflows.append({
+            "period": period,
+            "theatrical_cf": cf_theatrical,
+            "pvod_cf": cf_pvod,
+            "streaming_cf": cf_streaming,
+            "ad_cf": cf_ad,
+            "license_cf": cf_license,
+            "total_cf": total_cf,
+        })
+    
+    df_cf = pd.DataFrame(cashflows)
+    
+    # Compute cumulative NPV
+    discount_rate_period = (1 + asmp.DISCOUNT_RATE) ** (1 / periods_per_year) - 1
+    
+    df_cf["discount_factor"] = 1 / ((1 + discount_rate_period) ** df_cf["period"])
+    df_cf["discounted_cf"] = df_cf["total_cf"] * df_cf["discount_factor"]
+    df_cf["cumulative_npv"] = df_cf["discounted_cf"].cumsum()
+    
+    return df_cf
