@@ -1,4 +1,4 @@
-"""Portfolio Dashboard page for Magic Slate."""
+"""Portfolio Dashboard page for Magic Slate - Enhanced with strategic analytics."""
 
 import streamlit as st
 import plotly.express as px
@@ -12,12 +12,16 @@ from magicslate.portfolio_dashboard import (
     compute_concentration_metrics,
     compute_classification_distribution,
     filter_scorecards,
+    compute_title_risk_return_data,
+    compute_hhi_by_segment,
+    compute_over_under_investment,
+    compute_new_vs_library_split,
 )
 
 st.set_page_config(page_title="Portfolio Dashboard - Magic Slate", page_icon="📊", layout="wide")
 
-st.title("📊 Portfolio Dashboard")
-st.markdown("Comprehensive portfolio analytics and strategic insights")
+st.title("📊 Portfolio Strategy & Analysis")
+st.markdown("Comprehensive portfolio analytics and strategic insights for content planning")
 
 # Get data from session state
 df_scorecards = st.session_state.df_scorecards
@@ -66,7 +70,7 @@ filtered_scorecards = filter_scorecards(
 st.sidebar.markdown(f"**Filtered: {len(filtered_scorecards)} / {len(df_scorecards)} titles**")
 
 # Summary metrics
-st.markdown("## 📈 Filtered Portfolio Summary")
+st.markdown("## 📈 Portfolio Summary")
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -89,7 +93,217 @@ with col4:
 
 st.markdown("---")
 
-# View selector
+# Risk vs Return Analysis
+st.markdown("## 📉 Portfolio Risk / Return Landscape")
+
+risk_return_data = compute_title_risk_return_data(filtered_scorecards, df_titles)
+
+if not risk_return_data.empty:
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        fig = px.scatter(
+            risk_return_data,
+            x="risk_metric",
+            y="roi",
+            size="total_value",
+            color="brand",
+            hover_name="title_name",
+            hover_data={
+                "risk_metric": ":.3f",
+                "roi": ":.1%",
+                "total_value": ":$,.0f",
+                "brand": True
+            },
+            labels={
+                "risk_metric": "Risk (ROI Volatility)",
+                "roi": "Return on Investment",
+                "total_value": "Total Value ($)"
+            },
+            title="Title-Level Risk vs Return by Brand"
+        )
+        
+        # Add quadrant lines
+        median_risk = risk_return_data["risk_metric"].median()
+        median_roi = risk_return_data["roi"].median()
+        
+        fig.add_hline(y=median_roi, line_dash="dash", line_color="gray", 
+                     annotation_text=f"Median ROI: {median_roi*100:.0f}%")
+        fig.add_vline(x=median_risk, line_dash="dash", line_color="gray",
+                     annotation_text=f"Median Risk: {median_risk:.2f}")
+        
+        fig.update_layout(height=500)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.markdown("#### Interpretation")
+        st.markdown("""
+        **Risk Metric**: ROI volatility within brand/genre segment
+        
+        **Quadrants**:
+        - **Top-Left**: High return, low risk (optimal)
+        - **Top-Right**: High return, high risk (aggressive)
+        - **Bottom-Left**: Low return, low risk (stable)
+        - **Bottom-Right**: Low return, high risk (avoid)
+        
+        **Bubble Size**: Total value generated
+        """)
+        
+        # Quadrant summary
+        top_left = risk_return_data[
+            (risk_return_data["roi"] > median_roi) & 
+            (risk_return_data["risk_metric"] < median_risk)
+        ]
+        st.metric("Optimal Titles", len(top_left))
+        st.caption("High return, low risk")
+
+st.markdown("---")
+
+# Portfolio Health Metrics
+st.markdown("## 🎯 Portfolio Health & Concentration")
+
+col1, col2, col3 = st.columns(3)
+
+# HHI by Brand
+brand_hhi = compute_hhi_by_segment(filtered_scorecards, segment_by="brand")
+
+with col1:
+    st.markdown("### Value Concentration by Brand")
+    st.metric("HHI (Brand)", f"{brand_hhi['hhi']:.0f}")
+    st.caption(brand_hhi['interpretation'])
+    
+    if brand_hhi['hhi'] < 1500:
+        st.success("✅ Healthy diversification")
+    elif brand_hhi['hhi'] < 2500:
+        st.warning("⚠️ Moderate concentration")
+    else:
+        st.error("🔴 High concentration risk")
+
+# HHI by Genre
+genre_hhi = compute_hhi_by_segment(filtered_scorecards, segment_by="genre")
+
+with col2:
+    st.markdown("### Value Concentration by Genre")
+    st.metric("HHI (Genre)", f"{genre_hhi['hhi']:.0f}")
+    st.caption(genre_hhi['interpretation'])
+
+# Top titles concentration
+concentration = compute_concentration_metrics(filtered_scorecards, top_n=10)
+
+with col3:
+    st.markdown("### Top Titles Concentration")
+    st.metric("Top 10 Value Share", f"{concentration['top_n_share']*100:.1f}%")
+    st.caption(f"{concentration['top_n']} of {concentration['total_titles']} titles")
+    
+    if concentration['top_n_share'] > 0.6:
+        st.warning("⚠️ Value highly concentrated")
+    else:
+        st.success("✅ Balanced value distribution")
+
+# New vs Library split
+new_lib_split = compute_new_vs_library_split(filtered_scorecards, df_titles)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("### New Releases vs Library Value")
+    
+    fig = go.Figure(data=[
+        go.Pie(
+            labels=["New Releases", "Library"],
+            values=[new_lib_split['new_value'], new_lib_split['library_value']],
+            marker_colors=['#1f77b4', '#ff7f0e'],
+            textinfo='label+percent',
+            hovertemplate='<b>%{label}</b><br>Value: $%{value:,.0f}<br>Share: %{percent}<extra></extra>'
+        )
+    ])
+    
+    fig.update_layout(height=350, title="Value Distribution: New vs Library")
+    st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    st.markdown("### Split Summary")
+    st.metric("New Releases Share", f"{new_lib_split['new_share']*100:.1f}%")
+    st.caption(f"{new_lib_split['new_count']} titles")
+    
+    st.metric("Library Share", f"{new_lib_split['library_share']*100:.1f}%")
+    st.caption(f"{new_lib_split['library_count']} titles")
+    
+    st.markdown("---")
+    
+    if new_lib_split['new_share'] < 0.3:
+        st.warning("⚠️ Portfolio skewed toward library")
+    elif new_lib_split['new_share'] > 0.7:
+        st.info("ℹ️ Portfolio skewed toward new releases")
+    else:
+        st.success("✅ Balanced new/library mix")
+
+st.markdown("---")
+
+# Over/Under Investment Analysis
+st.markdown("## 💰 Investment Efficiency by Segment")
+
+tab1, tab2 = st.tabs(["By Brand", "By Genre"])
+
+with tab1:
+    st.markdown("### Brand Investment Analysis")
+    
+    brand_investment = compute_over_under_investment(filtered_scorecards, segment_by="brand")
+    
+    if not brand_investment.empty:
+        # Format for display
+        display_df = brand_investment.copy()
+        display_df["cost_share"] = display_df["cost_share"].apply(lambda x: f"{x*100:.1f}%")
+        display_df["value_share"] = display_df["value_share"].apply(lambda x: f"{x*100:.1f}%")
+        display_df.columns = ["Brand", "Cost Share", "Value Share", "Status"]
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Summary insights
+        over_invested = brand_investment[brand_investment["status"] == "Over-invested ⚠️"]
+        under_invested = brand_investment[brand_investment["status"] == "Under-invested ✅"]
+        
+        st.markdown("#### Key Insights:")
+        
+        if not under_invested.empty:
+            under_brands = ", ".join(under_invested["brand"].tolist())
+            st.success(f"**Under-invested (opportunities)**: {under_brands} - Consider increasing investment")
+        
+        if not over_invested.empty:
+            over_brands = ", ".join(over_invested["brand"].tolist())
+            st.warning(f"**Over-invested (review needed)**: {over_brands} - Returns not matching investment level")
+
+with tab2:
+    st.markdown("### Genre Investment Analysis")
+    
+    genre_investment = compute_over_under_investment(filtered_scorecards, segment_by="genre")
+    
+    if not genre_investment.empty:
+        # Format for display
+        display_df = genre_investment.copy()
+        display_df["cost_share"] = display_df["cost_share"].apply(lambda x: f"{x*100:.1f}%")
+        display_df["value_share"] = display_df["value_share"].apply(lambda x: f"{x*100:.1f}%")
+        display_df.columns = ["Genre", "Cost Share", "Value Share", "Status"]
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Summary insights
+        over_invested = genre_investment[genre_investment["status"] == "Over-invested ⚠️"]
+        under_invested = genre_investment[genre_investment["status"] == "Under-invested ✅"]
+        
+        st.markdown("#### Key Insights:")
+        
+        if not under_invested.empty:
+            under_genres = ", ".join(under_invested["genre"].tolist())
+            st.success(f"**Under-invested (opportunities)**: {under_genres}")
+        
+        if not over_invested.empty:
+            over_genres = ", ".join(over_invested["genre"].tolist())
+            st.warning(f"**Over-invested (review needed)**: {over_genres}")
+
+st.markdown("---")
+
+# View selector (existing views)
 view_tab1, view_tab2, view_tab3, view_tab4 = st.tabs([
     "📊 By Brand", "🎭 By Genre", "📺 By Platform", "🏆 By Classification"
 ])
@@ -319,44 +533,3 @@ with view_tab4:
     display_df['roi'] = display_df['roi'].apply(lambda x: f"{x*100:.1f}%")
     
     st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-st.markdown("---")
-
-# Concentration analysis
-st.markdown("## 🎯 Portfolio Concentration Analysis")
-
-concentration = compute_concentration_metrics(filtered_scorecards, top_n=10)
-
-col1, col2, col3 = st.columns([1, 1, 2])
-
-with col1:
-    st.metric("Total Titles", concentration['total_titles'])
-    st.metric("Top 10 Value Share", f"{concentration['top_n_share']*100:.1f}%")
-
-with col2:
-    st.metric("HHI Index", f"{concentration['hhi']:.0f}")
-    
-    hhi = concentration['hhi']
-    if hhi < 1500:
-        concentration_level = "✅ Competitive"
-    elif hhi < 2500:
-        concentration_level = "⚠️ Moderate"
-    else:
-        concentration_level = "🔴 High Concentration"
-    
-    st.markdown(f"**Concentration Level:** {concentration_level}")
-
-with col3:
-    # Top 10 titles
-    st.markdown("#### Top 10 Titles by Value")
-    
-    top_titles_df = pd.DataFrame(concentration['top_titles'])
-    top_titles_df['total_value'] = top_titles_df['total_value'].apply(lambda x: f"${x/1_000_000:.1f}M")
-    top_titles_df['value_share'] = top_titles_df['value_share'].apply(lambda x: f"{x*100:.1f}%")
-    top_titles_df['roi'] = top_titles_df['roi'].apply(lambda x: f"{x*100:.0f}%")
-    
-    st.dataframe(
-        top_titles_df[['title_name', 'brand', 'total_value', 'value_share', 'roi']], 
-        use_container_width=True,
-        hide_index=True
-    )

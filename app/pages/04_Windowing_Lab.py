@@ -1,4 +1,4 @@
-"""Windowing Lab page for Magic Slate."""
+"""Windowing Lab page for Magic Slate - Enhanced with cash flow modeling."""
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -8,13 +8,15 @@ from magicslate.windowing_simulator import (
     simulate_windowing_scenarios,
     create_default_windowing_scenarios,
     compare_scenarios,
+    compute_cashflow_timeline,
 )
 from magicslate.data_models import WindowingScenario
+from magicslate import assumptions as asmp
 
 st.set_page_config(page_title="Windowing Lab - Magic Slate", page_icon="🎞️", layout="wide")
 
-st.title("🎞️ Windowing Lab")
-st.markdown("Simulate release window strategies and analyze their financial impact")
+st.title("🎞️ Windowing & Deal Valuation")
+st.markdown("Model release window strategies and analyze their financial impact with detailed cash flow analysis")
 
 # Get data from session state
 df_titles = st.session_state.df_titles
@@ -23,9 +25,8 @@ df_quality = st.session_state.df_quality
 df_scorecards = st.session_state.df_scorecards
 
 st.markdown("""
-The Windowing Lab allows you to model different release strategies for titles and 
-understand how theatrical, PVOD, streaming, and licensing windows interact to 
-maximize total value.
+The Windowing Lab models how theatrical, PVOD, streaming, and licensing windows interact to 
+maximize total NPV, accounting for cannibalization effects and time value of money.
 """)
 
 st.markdown("---")
@@ -70,8 +71,39 @@ st.markdown(f"**Selected:** {selected_title['title_name']} - {selected_title['br
 
 st.markdown("---")
 
+# Global assumptions for sensitivity
+st.markdown("## ⚙️ Global Assumptions")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    arpu_multiplier = st.slider(
+        "ARPU Adjustment",
+        min_value=0.8,
+        max_value=1.2,
+        value=1.0,
+        step=0.05,
+        help="Adjust base ARPU assumption (1.0 = $7.99/month)"
+    )
+    
+with col2:
+    discount_rate_pct = st.slider(
+        "Annual Discount Rate (%)",
+        min_value=5,
+        max_value=15,
+        value=10,
+        step=1,
+        help="Discount rate for NPV calculation"
+    )
+
+# Override assumptions temporarily (for sensitivity)
+original_discount_rate = asmp.DISCOUNT_RATE
+asmp.DISCOUNT_RATE = discount_rate_pct / 100.0
+
+st.markdown("---")
+
 # Scenario configuration
-st.markdown("## ⚙️ Configure Windowing Scenarios")
+st.markdown("## 📋 Configure Windowing Scenarios")
 
 st.markdown("Define 2-3 different windowing strategies to compare:")
 
@@ -176,8 +208,22 @@ if st.button("🚀 Run Windowing Simulation", type="primary"):
             df_quality=df_quality
         )
         
+        # Compute cash flow timelines for each scenario
+        cashflow_timelines = {}
+        for scenario in scenarios:
+            cf_timeline = compute_cashflow_timeline(
+                title_id=selected_title_id,
+                scenario=scenario,
+                df_titles=df_titles,
+                df_engagement=df_engagement,
+                df_quality=df_quality,
+                periods_per_year=52
+            )
+            cashflow_timelines[scenario.scenario_name] = cf_timeline
+        
         st.session_state.windowing_results = results_df
         st.session_state.windowing_scenarios = scenarios
+        st.session_state.cashflow_timelines = cashflow_timelines
 
 # Display results
 if "windowing_results" in st.session_state and st.session_state.windowing_results is not None:
@@ -185,6 +231,91 @@ if "windowing_results" in st.session_state and st.session_state.windowing_result
     st.markdown("## 📊 Simulation Results")
     
     results_df = st.session_state.windowing_results
+    scenarios_list = st.session_state.windowing_scenarios
+    cashflow_timelines = st.session_state.cashflow_timelines
+    
+    # Scenario Inputs & Key Assumptions Panel
+    with st.expander("📋 Scenario Assumptions & Parameters", expanded=True):
+        st.markdown("### Scenario Configurations")
+        
+        assumptions_data = []
+        for scenario in scenarios_list:
+            assumptions_data.append({
+                "Scenario": scenario.scenario_name,
+                "Theatrical Window": f"{scenario.theatrical_window_days} days",
+                "PVOD Window": f"{scenario.pvod_window_days} days",
+                "Disney+ Offset": f"{scenario.disney_plus_offset_days} days",
+                "Hulu Offset": f"{scenario.hulu_offset_days} days",
+                "License Start": f"{scenario.third_party_license_start_days} days" if scenario.third_party_license_start_days > 0 else "No license",
+                "License Fee": f"${scenario.third_party_license_fee/1_000_000:.1f}M" if scenario.third_party_license_fee > 0 else "N/A"
+            })
+        
+        assumptions_df = pd.DataFrame(assumptions_data)
+        st.dataframe(assumptions_df, use_container_width=True, hide_index=True)
+        
+        st.markdown("### Model Assumptions")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            **Economic Parameters:**
+            - ARPU (Disney+): ${asmp.DISNEY_PLUS_ARPU * arpu_multiplier:.2f}/month
+            - ARPU (Hulu): ${asmp.HULU_ARPU * arpu_multiplier:.2f}/month
+            - Annual Discount Rate: {discount_rate_pct}%
+            - Period: Weekly cashflows
+            """)
+        
+        with col2:
+            st.markdown(f"""
+            **Cannibalization Factors:**
+            - PVOD cannibalization (early streaming): {asmp.PVOD_CANNIBALIZATION_FACTOR*100:.0f}%
+            - Streaming cannibalization (licensing): {asmp.LICENSE_CANNIBALIZATION_FACTOR*100:.0f}%
+            - Streaming decay with window timing: Varies by offset
+            """)
+    
+    # Model Details Expander
+    with st.expander("📘 Model Details: NPV Calculation & Cannibalization"):
+        st.markdown("""
+        ### NPV Calculation Methodology
+        
+        **Net Present Value (NPV)** is computed by discounting all future cashflows to present value:
+        
+        ```
+        NPV = Σ (Cashflow_t / (1 + r)^t)
+        ```
+        
+        Where:
+        - `r` = periodic discount rate (derived from annual rate)
+        - `t` = time period (weeks)
+        - All cashflows are spread over appropriate time windows
+        
+        ### Window-Specific Modeling
+        
+        1. **Theatrical**: 
+           - Revenue spread over 12 weeks from release
+           - Based on production budget tier and quality scores
+        
+        2. **PVOD**:
+           - Starts after theatrical window
+           - Revenue = Base PVOD × Window Factor × Quality Factor
+           - Cannibalization: Shorter streaming windows reduce PVOD by up to 30%
+        
+        3. **Streaming**:
+           - Starts after streaming offset
+           - Spread over 104 weeks (2 years) with exponential decay
+           - Adjusted for window timing (earlier = less decay)
+           - Reduced by 25% if third-party license exists
+        
+        4. **Licensing**:
+           - Lump sum payment at license start date
+           - Immediate cash but reduces long-term streaming value
+        
+        ### Cannibalization Effects
+        
+        - **PVOD ← Streaming**: If streaming starts < 45 days, PVOD reduced 30%; 45-75 days: 15%; > 75 days: no impact
+        - **Streaming ← Licensing**: Third-party licensing reduces exclusive streaming value by 25%
+        - **Engagement ← Window Length**: Longer windows risk engagement decay
+        """)
     
     # NPV comparison
     st.markdown("### 💰 NPV Comparison")
@@ -215,8 +346,66 @@ if "windowing_results" in st.session_state and st.session_state.windowing_result
     
     st.markdown("---")
     
+    # Cash Flow Timeline & Cumulative NPV
+    st.markdown("### 📈 Cash Flow Timeline & Cumulative NPV")
+    
+    # Cash flow by period
+    fig = go.Figure()
+    
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+    
+    for idx, (scenario_name, cf_df) in enumerate(cashflow_timelines.items()):
+        # Aggregate by broader periods for visualization (every 4 weeks)
+        cf_agg = cf_df.groupby(cf_df["period"] // 4).agg({
+            "total_cf": "sum",
+            "period": "min"
+        })
+        
+        fig.add_trace(go.Scatter(
+            x=cf_agg["period"],
+            y=cf_agg["total_cf"] / 1_000_000,
+            mode='lines',
+            name=scenario_name,
+            line=dict(width=2, color=colors[idx % len(colors)])
+        ))
+    
+    fig.update_layout(
+        title="Total Cash Flow by Period (4-week buckets)",
+        xaxis_title="Week",
+        yaxis_title="Cash Flow ($ Millions)",
+        height=400,
+        hovermode='x unified'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Cumulative NPV over time
+    fig = go.Figure()
+    
+    for idx, (scenario_name, cf_df) in enumerate(cashflow_timelines.items()):
+        fig.add_trace(go.Scatter(
+            x=cf_df["period"],
+            y=cf_df["cumulative_npv"] / 1_000_000,
+            mode='lines',
+            name=scenario_name,
+            line=dict(width=3, color=colors[idx % len(colors)])
+        ))
+    
+    fig.update_layout(
+        title="Cumulative NPV Over Time",
+        xaxis_title="Week",
+        yaxis_title="Cumulative NPV ($ Millions)",
+        height=400,
+        hovermode='x unified',
+        legend=dict(x=0.02, y=0.98)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("---")
+    
     # Value breakdown
-    st.markdown("### 📈 Value Breakdown by Scenario")
+    st.markdown("### 📊 Value Breakdown by Scenario")
     
     # Stacked bar chart
     fig = go.Figure()
@@ -262,13 +451,37 @@ if "windowing_results" in st.session_state and st.session_state.windowing_result
     
     fig.update_layout(
         barmode='stack',
-        title="Value Components by Scenario",
+        title="Value Components by Scenario (Undiscounted)",
         xaxis_title="Scenario",
         yaxis_title="Value ($ Millions)",
         height=400
     )
     
     st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Sensitivity Analysis
+    st.markdown("### 🔍 Sensitivity Analysis: ARPU Impact")
+    
+    st.markdown(f"Current ARPU multiplier: **{arpu_multiplier:.2f}x** (Base: ${asmp.DISNEY_PLUS_ARPU:.2f}/month)")
+    
+    # Show how NPV varies with ARPU
+    sensitivity_arpu = [0.8, 0.9, 1.0, 1.1, 1.2]
+    
+    st.markdown("Adjust the ARPU slider above to see real-time impact on scenario NPVs.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("Current Discount Rate", f"{discount_rate_pct}%")
+        st.caption("Adjust slider above to perform sensitivity analysis")
+    
+    with col2:
+        npv_range = results_df['total_npv'].max() - results_df['total_npv'].min()
+        npv_range_pct = (npv_range / results_df['total_npv'].max() * 100) if results_df['total_npv'].max() > 0 else 0
+        st.metric("NPV Range Across Scenarios", f"{npv_range_pct:.1f}%")
+        st.caption("How much windowing strategy matters")
     
     st.markdown("---")
     
@@ -297,6 +510,9 @@ if "windowing_results" in st.session_state and st.session_state.windowing_result
 
 else:
     st.info("👆 Configure scenarios above and click 'Run Windowing Simulation' to see results.")
+
+# Reset discount rate
+asmp.DISCOUNT_RATE = original_discount_rate
 
 st.markdown("---")
 
